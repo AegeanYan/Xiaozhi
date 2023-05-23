@@ -7,9 +7,10 @@ from rl.agents.dqn import DQNAgent
 from rl.memory import SequentialMemory
 from rl.policy import LinearAnnealedPolicy, EpsGreedyQPolicy
 from tabulate import tabulate
-from poke_env.data import GenData
+from poke_env.data import GenData, to_id_str
 
-Typechart = GenData.from_gen(8).type_chart
+Data = GenData.from_gen(8)
+Typechart = Data.type_chart
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Flatten
 from tensorflow.keras.models import Sequential
@@ -57,27 +58,57 @@ class SimpleRLPlayer(Gen8EnvSinglePlayer):
                 battle.opponent_active_pokemon.type_2,
             ),
         ]
-        
-        # We count how many pokemons have fainted in each team
-        fainted_mon_team = len([mon for mon in battle.team.values() if mon.fainted]) / 6
-        fainted_mon_opponent = (
-            len([mon for mon in battle.opponent_team.values() if mon.fainted]) / 6
-        )
+        # Show pokemon id to env
+        mon_team_id = [Data.pokedex[mon._species]['num']/1000 for mon in battle.team.values()]
+        mon_opponent_id = [Data.pokedex[mon._species]['num']/1000 for mon in battle.opponent_team.values()]
+        while len(mon_opponent_id) < 6:
+            mon_opponent_id.append(0)
 
+        # Show boost to env
+        mon_boost = list(battle.active_pokemon._boosts.values())
+        mon_boost = [boost/6 for boost in mon_boost]
+        opponent_boost = list(battle.opponent_active_pokemon._boosts.values())
+        opponent_boost = [boost/6 for boost in opponent_boost]
+
+        # We count how many pokemons have fainted in each team
+        fainted_mon_team = [1]*6
+        for i,mon in enumerate(battle.team.values()):
+            if mon.fainted:
+                fainted_mon_team[i] = 0
+        fainted_mon_opponent = [1]*6
+        for i,mon in enumerate(battle.opponent_team.values()):
+            if mon.fainted:
+                fainted_mon_opponent[i] = 0
+            
+        
+        # Show the current HP of active pokemon
+        mon_hp = battle.active_pokemon.current_hp / battle.active_pokemon.max_hp
+        opponent_hp = battle.opponent_active_pokemon.current_hp / battle.opponent_active_pokemon.max_hp
+
+        # Show current mon
+        mon_current = Data.pokedex[battle.active_pokemon._species]['num']/1000
+        opponent_current = Data.pokedex[battle.opponent_active_pokemon._species]['num']/1000
         # Final vector with 10 components
         final_vector = np.concatenate(
             [
-                moves_base_power,
-                moves_dmg_multiplier,
-                [fainted_mon_team, fainted_mon_opponent],
-                mon_rst_multiplier,
+                [mon_current, opponent_current],#2 * 1
+                [mon_hp,opponent_hp],# 2 * 1
+                moves_base_power,# 4
+                moves_dmg_multiplier,# 4
+                fainted_mon_team, # 6
+                fainted_mon_opponent,# 6
+                mon_rst_multiplier,# 2
+                mon_boost,# 7
+                opponent_boost,# 7
+                mon_team_id,# 6
+                mon_opponent_id,# 6
             ]
         )
         return np.float32(final_vector)
 
     def describe_embedding(self) -> Space:
-        low = [-1, -1, -1, -1, 0, 0, 0, 0, 0, 0]
-        high = [3, 3, 3, 3, 4, 4, 4, 4, 1, 1]
+        low = [0, 0, 0, 0, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        high = [1, 1, 1, 1, 3, 3, 3, 3, 4, 4, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
         return Box(
             np.array(low, dtype=np.float32),
             np.array(high, dtype=np.float32),
@@ -114,7 +145,7 @@ async def main():
     model.add(Dense(n_action, activation="linear"))
 
     # Defining the DQN
-    memory = SequentialMemory(limit=10000, window_length=1)
+    memory = SequentialMemory(limit=2000, window_length=1)
 
     policy = LinearAnnealedPolicy(
         EpsGreedyQPolicy(),
@@ -135,13 +166,14 @@ async def main():
         target_model_update=1,
         delta_clip=0.01,
         enable_double_dqn=True,
+        enable_dueling_network=True,
     )
     dqn.compile(Adam(learning_rate=0.00025), metrics=["mae"])
 
     # Training the model
     dqn.fit(train_env, nb_steps=10000)
     train_env.close()
-    dqn.save_weights("dqn_modified.h5", overwrite=True)
+    dqn.save_weights("d3qn.h5", overwrite=True)
 
     # dqn.load_weights("dqn.h5")
 

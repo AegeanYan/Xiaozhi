@@ -16,7 +16,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import Dense, Flatten
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.optimizers import Adam
-
+from poke_env.environment.side_condition import SideCondition
 from poke_env.environment.abstract_battle import AbstractBattle
 from poke_env.player import (
     background_evaluate_player,
@@ -28,11 +28,19 @@ from poke_env.player import (
     SimpleHeuristicsPlayer,
 )
 
+ENTRY_HAZARDS = {
+        "spikes": SideCondition.SPIKES,
+        "stealhrock": SideCondition.STEALTH_ROCK,
+        "stickyweb": SideCondition.STICKY_WEB,
+        "toxicspikes": SideCondition.TOXIC_SPIKES,
+    }
+
+ANTI_HAZARDS_MOVES = {"rapidspin", "defog"}
 
 class SimpleRLPlayer(Gen8EnvSinglePlayer):
     def calc_reward(self, last_battle, current_battle) -> float:
         return self.reward_computing_helper(
-            current_battle, fainted_value=2.0, hp_value=1.0, victory_value=30.0
+            current_battle, fainted_value=2.0, hp_value=1.0, victory_value=100.0
         )
     # def calc_reward(self, last_battle, current_battle) -> float:
     #     return self.reward_computing_helper(
@@ -53,185 +61,119 @@ class SimpleRLPlayer(Gen8EnvSinglePlayer):
                     battle.opponent_active_pokemon.type_2,
                     type_chart=Typechart,
                 )
-        #calculate the pokemon's resistance to the opponent's type
-        mon_rst_multiplier = [
+        moves_actual_power = [0] * 4
+        for i, move in enumerate(battle.available_moves):
+            moves_actual_power[i] = moves_base_power[i] * moves_dmg_multiplier[i] / 4
+        
+        #calculate the pokemon's resistance to the opponent's type choose max from two
+        mon_rst_multiplier = max([
             battle.active_pokemon.damage_multiplier(
                 battle.opponent_active_pokemon.type_1,
             ),
             battle.active_pokemon.damage_multiplier(
                 battle.opponent_active_pokemon.type_2,
             ),
-        ]
-        # Show pokemon id to env
-        mon_team_id = [Data.pokedex[mon._species]['num']/1000 for mon in battle.team.values()]
-        mon_opponent_id = [Data.pokedex[mon._species]['num']/1000 for mon in battle.opponent_team.values()]
-        while len(mon_opponent_id) < 6:
-            mon_opponent_id.append(0)
+        ])
 
         # Show boost to env
         mon_boost = list(battle.active_pokemon._boosts.values())
-        mon_boost = [boost/6 for boost in mon_boost]
-        opponent_boost = list(battle.opponent_active_pokemon._boosts.values())
-        opponent_boost = [boost/6 for boost in opponent_boost]
+        mon_boost = [boost for boost in mon_boost]
+        # opponent_boost is no need
+        # opponent_boost = list(battle.opponent_active_pokemon._boosts.values())
+        # opponent_boost = [boost for boost in opponent_boost]
 
-        # We count how many pokemons have fainted in each team
+        # We count which pokemons I have fainted for switching purposes
         fainted_mon_team = [1]*6
         for i,mon in enumerate(battle.team.values()):
             if mon.fainted:
                 fainted_mon_team[i] = 0
-        fainted_mon_opponent = [1]*6
-        for i,mon in enumerate(battle.opponent_team.values()):
-            if mon.fainted:
-                fainted_mon_opponent[i] = 0
             
         
         # Show the current HP of active pokemon
-        mon_hp = battle.active_pokemon.current_hp / battle.active_pokemon.max_hp
-        opponent_hp = battle.opponent_active_pokemon.current_hp / battle.opponent_active_pokemon.max_hp
+        mon_hp = battle.active_pokemon.current_hp / 100
+        opponent_hp = battle.opponent_active_pokemon.current_hp / 100
 
-        # Show current mon
-        mon_current = Data.pokedex[battle.active_pokemon._species]['num']/1000
-        opponent_current = Data.pokedex[battle.opponent_active_pokemon._species]['num']/1000
+        mon_team_rst_multiplier = []
+        for mon in battle.team.values():
+            mon_team_rst_multiplier.append(max([
+                mon.damage_multiplier(
+                    battle.opponent_active_pokemon.type_1,
+                ),
+                mon.damage_multiplier(
+                    battle.opponent_active_pokemon.type_2,
+                )
+            ]))
+        mon_active_index = -1
+        for i, mon in enumerate(battle.team.values()):
+            if mon == battle.active_pokemon:
+                mon_active_index = i
+                break
+        mon_team_can_dynamax = int(battle.can_dynamax)
+        mon_opponent_can_dynamax = int(battle.opponent_can_dynamax)
+        mon_active_dynamaxed = int(battle.active_pokemon.is_dynamaxed)
+        mon_opponent_dynamaxed = int(battle.opponent_active_pokemon.is_dynamaxed)
+        n_opp_remaining_mons = 6 - len(
+                [m for m in battle.opponent_team.values() if m.fainted is True]
+            )
+        
+        mon_anti_hazard_move = -1
+        for i,move in enumerate(battle.available_moves):
+            if move.id in ANTI_HAZARDS_MOVES:
+                mon_anti_hazard_move = i
+                break
+        mon_entry_hazard_move = -1
+        for i,move in enumerate(battle.available_moves):
+            if move.id in ENTRY_HAZARDS:
+                mon_entry_hazard_move = i
+                break
+        mon_team_side_conditions = 0
+        for condition in ENTRY_HAZARDS.values():
+            if condition in battle.side_conditions:
+                mon_team_side_conditions = 1
+                break
+        mon_opponent_side_conditions = 0
+        for condition in ENTRY_HAZARDS.values():
+            if condition in battle.opponent_side_conditions:
+                mon_opponent_side_conditions = 1
+                break
+        mon_spe = battle.active_pokemon.base_stats["spe"] / 100
+        mon_opponent_spe = battle.opponent_active_pokemon.base_stats["spe"] / 100
+        
+        
         # Final vector with 10 components
         final_vector = np.concatenate(
             [
-                [mon_current, opponent_current],#2 * 1
+                [mon_active_index],# 1
+                [mon_rst_multiplier],# 1
+                mon_team_rst_multiplier,# 6
                 [mon_hp,opponent_hp],# 2 * 1
-                moves_base_power,# 4
-                moves_dmg_multiplier,# 4
+                [mon_team_can_dynamax,
+                mon_opponent_can_dynamax,
+                mon_active_dynamaxed,
+                mon_opponent_dynamaxed],#4 * 1
+                moves_actual_power,# 4
                 fainted_mon_team, # 6
-                fainted_mon_opponent,# 6
-                mon_rst_multiplier,# 2
-                mon_boost,# 7
-                opponent_boost,# 7
-                mon_team_id,# 6
-                mon_opponent_id,# 6
+                [n_opp_remaining_mons],# 1
+                [mon_anti_hazard_move,
+                 mon_entry_hazard_move],# 2
+                 [mon_team_side_conditions,
+                mon_opponent_side_conditions],# 2
+                [mon_spe,mon_opponent_spe]# 2 * 1
             ]
         )
         return np.float32(final_vector)
 
     def describe_embedding(self) -> Space:
-        low = [0, 0, 0, 0, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        high = [1, 1, 1, 1, 3, 3, 3, 3, 4, 4, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        # low = [0, 0, 0, 0, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        # high = [1, 1, 1, 1, 3, 3, 3, 3, 4, 4, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        low = [0] * 1 + [0] * 1 + [0] * 6 + [0] * 2 + [0] * 4 + [-1] * 4  + [0] * 6 + [0] * 1 + [-1] * 2 + [0] * 2 + [0] * 2
+        high = [5] * 1 + [4] * 1 + [4] * 6 + [8] * 2 + [1] * 4 + [3] * 4  + [1] * 6 + [6] * 1 + [3] * 2 + [1] * 2 + [4] * 2
         return Box(
             np.array(low, dtype=np.float32),
             np.array(high, dtype=np.float32),
             dtype=np.float32,
         )
 
-
-async def main():
-    # First test the environment to ensure the class is consistent
-    # with the OpenAI API
-    # test_env = SimpleRLPlayer(battle_format="gen8randombattle", start_challenging=True)
-    # check_env(test_env)
-    # test_env.close()
-
-    # Create one environment for training and one for evaluation
-    # opponent = SimpleHeuristicsPlayer(battle_format="gen8randombattle")
-    opponent = RandomPlayer(battle_format="gen8randombattle")
-    # opponent = MaxBasePowerPlayer(battle_format="gen8randombattle")
-    train_env = SimpleRLPlayer(
-        battle_format="gen8randombattle", opponent=opponent, start_challenging=True
-    )
-    opponent = RandomPlayer(battle_format="gen8randombattle")
-    eval_env = SimpleRLPlayer(
-        battle_format="gen8randombattle", opponent=opponent, start_challenging=True
-    )
-
-    # Compute dimensions
-    n_action = train_env.action_space.n
-    input_shape = (1,) + train_env.observation_space.shape
-
-    # Create model
-    model = Sequential()
-    model.add(Dense(128, activation="elu", input_shape=input_shape))
-    model.add(Flatten())
-    model.add(Dense(64, activation="elu"))
-    model.add(Dense(n_action, activation="linear"))
-
-    # Defining the DQN
-    memory = SequentialMemory(limit=10000, window_length=1)
-
-    policy = LinearAnnealedPolicy(
-        EpsGreedyQPolicy(),
-        attr="eps",
-        value_max=1.0,
-        value_min=0.05,
-        value_test=0.0,
-        nb_steps=10000,
-    )
-
-    dqn = DQNAgent(
-        model=model,
-        nb_actions=n_action,
-        policy=policy,
-        memory=memory,
-        nb_steps_warmup=1000,
-        gamma=0.5,
-        target_model_update=1,
-        delta_clip=0.01,
-        enable_double_dqn=True,
-        enable_dueling_network=True,
-    )
-    dqn.compile(Adam(learning_rate=0.00025), metrics=["mae"])
-    # dqn.load_weights("d3qn.h5")
-    # Training the model
-    # dqn.load_weights("d3qn.h5")
-    tb = TensorBoard(log_dir="./logs/30000")
-    dqn.fit(train_env, nb_steps=10000, callbacks=[tb])
-    train_env.close()
-    dqn.save_weights("d3qn20000.h5", overwrite=True)
-
-    # dqn.load_weights("dqn.h5")
-
-    # Evaluating the model
-    print("Results against random player:")
-    dqn.test(eval_env, nb_episodes=10, verbose=False, visualize=False)
-    print(
-        f"DQN Evaluation: {eval_env.n_won_battles} victories out of {eval_env.n_finished_battles} episodes"
-    )
-    second_opponent = MaxBasePowerPlayer(battle_format="gen8randombattle")
-    eval_env.reset_env(restart=True, opponent=second_opponent)
-    print("Results against max base power player:")
-    dqn.test(eval_env, nb_episodes=10, verbose=False, visualize=False)
-    print(
-        f"DQN Evaluation: {eval_env.n_won_battles} victories out of {eval_env.n_finished_battles} episodes"
-    )
-    eval_env.reset_env(restart=False)
-
-    # # Evaluate the player with included util method
-    # n_challenges = 250
-    # placement_battles = 40
-    # eval_task = background_evaluate_player(
-    #     eval_env.agent, n_challenges, placement_battles
-    # )
-    # dqn.test(eval_env, nb_episodes=n_challenges, verbose=False, visualize=False)
-    # print("Evaluation with included method:", eval_task.result())
-    # eval_env.reset_env(restart=False)
-
-    # # Cross evaluate the player with included util method
-    # n_challenges = 50
-    # players = [
-    #     eval_env.agent,
-    #     RandomPlayer(battle_format="gen8randombattle"),
-    #     MaxBasePowerPlayer(battle_format="gen8randombattle"),
-    #     SimpleHeuristicsPlayer(battle_format="gen8randombattle"),
-    # ]
-    # cross_eval_task = background_cross_evaluate(players, n_challenges)
-    # dqn.test(
-    #     eval_env,
-    #     nb_episodes=n_challenges * (len(players) - 1),
-    #     verbose=False,
-    #     visualize=False,
-    # )
-    # cross_evaluation = cross_eval_task.result()
-    # table = [["-"] + [p.username for p in players]]
-    # for p_1, results in cross_evaluation.items():
-    #     table.append([p_1] + [cross_evaluation[p_1][p_2] for p_2 in results])
-    # print("Cross evaluation of DQN with baselines:")
-    # print(tabulate(table))
-    eval_env.close()
 
 async def train_with_opponent(opponent_type):
     if opponent_type == "random":
@@ -257,25 +199,26 @@ async def train_with_opponent(opponent_type):
     # Compute dimensions
     n_action = train_env.action_space.n
     input_shape = (1,) + train_env.observation_space.shape
-
+    print(input_shape)
     # Create model
     model = Sequential()
-    model.add(Dense(128, activation="elu", input_shape=input_shape))
+    model.add(Dense(256, activation="elu", input_shape=input_shape))
     model.add(Flatten())
     model.add(Dense(64, activation="elu"))
     model.add(Dense(n_action, activation="linear"))
 
     # Defining the DQN
-    memory = SequentialMemory(limit=10000, window_length=1)
+    memory = SequentialMemory(limit=3600, window_length=1)
 
-    policy = LinearAnnealedPolicy(
-        EpsGreedyQPolicy(),
-        attr="eps",
-        value_max=0.5,
-        value_min=0.05,
-        value_test=0.0,
-        nb_steps=10000,
-    )
+    # policy = LinearAnnealedPolicy(
+    #     EpsGreedyQPolicy(),
+    #     attr="eps",
+    #     value_max=0.8,
+    #     value_min=0.05,
+    #     value_test=0.0,
+    #     nb_steps=50000,
+    # )
+    policy = EpsGreedyQPolicy(eps=0.1)
 
     dqn = DQNAgent(
         model=model,
@@ -290,13 +233,11 @@ async def train_with_opponent(opponent_type):
         enable_dueling_network=True,
     )
     dqn.compile(Adam(learning_rate=0.00025), metrics=["mae"])
-    # dqn.load_weights("d3qn.h5")
-    # Training the model
-    dqn.load_weights("d3qn630000.h5")
-    tb = TensorBoard(log_dir="./logs/640000_new")
+    dqn.load_weights("./newbie/130000.h5")
+    tb = TensorBoard(log_dir="./logs/newbie/140000")
     dqn.fit(train_env, nb_steps=10000, callbacks=[tb])
     train_env.close()
-    dqn.save_weights("d3qn640000_new.h5", overwrite=True)
+    dqn.save_weights("./newbie/140000.h5", overwrite=True)
 
     print("Results against random player:")
     dqn.test(eval_env, nb_episodes=10, verbose=False, visualize=False)
@@ -324,13 +265,13 @@ async def evaluate():
 
     # Create model
     model = Sequential()
-    model.add(Dense(128, activation="elu", input_shape=input_shape))
+    model.add(Dense(256, activation="elu", input_shape=input_shape))
     model.add(Flatten())
     model.add(Dense(64, activation="elu"))
     model.add(Dense(n_action, activation="linear"))
 
     # Defining the DQN
-    memory = SequentialMemory(limit=10000, window_length=1)
+    memory = SequentialMemory(limit=3600, window_length=1)
 
     policy = LinearAnnealedPolicy(
         EpsGreedyQPolicy(),
@@ -347,7 +288,7 @@ async def evaluate():
         policy=policy,
         memory=memory,
         nb_steps_warmup=1000,
-        gamma=0.5,
+        gamma=0.95,
         target_model_update=1,
         delta_clip=0.01,
         enable_double_dqn=True,
@@ -356,7 +297,7 @@ async def evaluate():
     dqn.compile(Adam(learning_rate=0.00025), metrics=["mae"])
     # dqn.load_weights("d3qn.h5")
     # Training the model
-    dqn.load_weights("d3qn640000_new.h5")
+    dqn.load_weights("./newbie/140000.h5")
     print("Results against random player:")
     dqn.test(eval_env, nb_episodes=100, verbose=False, visualize=False)
     print(
@@ -373,5 +314,5 @@ async def evaluate():
     eval_env.close()
 
 if __name__ == "__main__":
-    # asyncio.get_event_loop().run_until_complete(train_with_opponent("max"))
-    asyncio.get_event_loop().run_until_complete(evaluate())
+    asyncio.get_event_loop().run_until_complete(train_with_opponent("max"))
+    # asyncio.get_event_loop().run_until_complete(evaluate())
